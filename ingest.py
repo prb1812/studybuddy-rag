@@ -1,0 +1,74 @@
+import os
+import pypdf
+import magic
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from sentence_transformers import SentenceTransformer
+
+MAX_FILE_SIZE_MB = 10
+MAX_PAGES = 200
+
+def validate_file(filepath, allowed_types=("application/pdf", "text/plain")):
+    """Check actual file content type, not just the extension."""
+    detected_type = magic.from_file(filepath, mime=True)
+    if detected_type not in allowed_types:
+        raise ValueError(f"Rejected: file is actually '{detected_type}', not allowed")
+    return detected_type
+
+def validate_file_size(filepath, max_mb=MAX_FILE_SIZE_MB):
+    """Security checkpoint: reject files that are too large."""
+    size_mb = os.path.getsize(filepath) / (1024 * 1024)
+    if size_mb > max_mb:
+        raise ValueError(f"Rejected: file is {size_mb:.2f}MB, exceeds {max_mb}MB limit")
+    return size_mb
+
+def extract_text_from_pdf(filepath, max_pages=MAX_PAGES):
+    text = ""
+    with open(filepath, "rb") as f:
+        reader = pypdf.PdfReader(f)
+        num_pages = len(reader.pages)
+
+        # Security checkpoint: reject files with too many pages
+        if num_pages > max_pages:
+            raise ValueError(f"Rejected: PDF has {num_pages} pages, exceeds {max_pages} page limit")
+
+        for page in reader.pages:
+            text += page.extract_text() or ""
+    return text
+
+def chunk_text(text, chunk_size=1000, chunk_overlap=200):
+    """Split text into overlapping chunks for embedding/retrieval later."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
+    chunks = splitter.split_text(text)
+    return chunks
+
+def embed_chunks(chunks, model_name="all-MiniLM-L6-v2"):
+    """Convert text chunks into vector embeddings."""
+    model = SentenceTransformer(model_name)
+    embeddings = model.encode(chunks)
+    return embeddings
+
+if __name__ == "__main__":
+    filepath = "uploads/small.pdf"
+
+    file_type = validate_file(filepath)
+    print(f"Validated file type: {file_type}")
+
+    size_mb = validate_file_size(filepath)
+    print(f"File size OK: {size_mb:.2f}MB")
+
+    text = extract_text_from_pdf(filepath)
+    print(f"Extracted {len(text)} characters")
+
+    chunks = chunk_text(text)
+    print(f"Created {len(chunks)} chunks")
+    print("\n--- Sample chunk (#5) ---")
+    print(chunks[5])
+
+    embeddings = embed_chunks(chunks)
+    print(f"Created {len(embeddings)} embeddings")
+    print(f"Each embedding has {len(embeddings[0])} dimensions")
+    print("\n--- First 10 numbers of embedding #5 ---")
+    print(embeddings[5][:10])
