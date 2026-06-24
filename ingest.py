@@ -1,6 +1,8 @@
 import os
 import pypdf
 import magic
+import faiss
+import numpy as np
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 
@@ -50,6 +52,21 @@ def embed_chunks(chunks, model_name="all-MiniLM-L6-v2"):
     embeddings = model.encode(chunks)
     return embeddings
 
+def build_vector_store(embeddings):
+    """Store embeddings in a FAISS index for similarity search."""
+    embeddings = np.array(embeddings).astype("float32")
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+    return index
+
+def search_similar_chunks(query, model, index, chunks, k=3):
+    """Embed a query and find the k most similar chunks."""
+    query_vector = model.encode([query]).astype("float32")
+    distances, indices = index.search(query_vector, k)
+    results = [chunks[i] for i in indices[0]]
+    return results
+
 if __name__ == "__main__":
     filepath = "uploads/small.pdf"
 
@@ -72,3 +89,18 @@ if __name__ == "__main__":
     print(f"Each embedding has {len(embeddings[0])} dimensions")
     print("\n--- First 10 numbers of embedding #5 ---")
     print(embeddings[5][:10])
+
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    embeddings = model.encode(chunks)
+    print(f"Created {len(embeddings)} embeddings")
+
+    index = build_vector_store(embeddings)
+    print(f"Vector store built with {index.ntotal} vectors")
+
+    # Test retrieval with a sample question
+    test_question = "What is broken or in progress?"
+    results = search_similar_chunks(test_question, model, index, chunks, k=2)
+
+    print(f"\n--- Question: {test_question} ---")
+    for i, chunk in enumerate(results):
+        print(f"\nResult {i+1}:\n{chunk}")
