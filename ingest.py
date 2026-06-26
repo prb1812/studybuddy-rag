@@ -1,4 +1,5 @@
 import os
+import re
 import pypdf
 import magic
 import faiss
@@ -43,11 +44,18 @@ def extract_text_from_pdf(filepath, max_pages=MAX_PAGES):
 
     return text
 
+def clean_text(text):
+    """Remove repeated boilerplate like copyright notices, collapse excess blank lines."""
+    text = re.sub(r"©\s*Copyright.*?Education\)", "", text, flags=re.DOTALL)
+    text = re.sub(r"\n{3,}", "\n\n", text)  # collapse 3+ blank lines into 2
+    return text.strip()
+
 def chunk_text(text, chunk_size=1000, chunk_overlap=200):
     """Split text into overlapping chunks for embedding/retrieval later."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ". ", " ", ""]  # prefer paragraph/sentence breaks over mid-word cuts
     )
     chunks = splitter.split_text(text)
     return chunks
@@ -126,7 +134,8 @@ if __name__ == "__main__":
         print(f"File size OK: {size_mb:.2f}MB")
 
         text = extract_text_from_pdf(filepath)
-        print(f"Extracted {len(text)} characters")
+        text = clean_text(text)
+        print(f"Extracted {len(text)} characters (after cleanup)")
 
         chunks = chunk_text(text)
         print(f"Created {len(chunks)} chunks")
