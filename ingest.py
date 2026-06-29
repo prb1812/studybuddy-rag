@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 
-MAX_FILE_SIZE_MB = 10
-MAX_PAGES = 200
+MAX_FILE_SIZE_MB = 50
+MAX_PAGES = 1000
 
 def validate_file(filepath, allowed_types=("application/pdf", "text/plain")):
     """Check actual file content type, not just the extension."""
@@ -26,19 +26,22 @@ def validate_file_size(filepath, max_mb=MAX_FILE_SIZE_MB):
         raise ValueError(f"Rejected: file is {size_mb:.2f}MB, exceeds {max_mb}MB limit")
     return size_mb
 
+import fitz  # PyMuPDF
+
 def extract_text_from_pdf(filepath, max_pages=MAX_PAGES):
     text = ""
-    with open(filepath, "rb") as f:
-        reader = pypdf.PdfReader(f)
-        num_pages = len(reader.pages)
+    doc = fitz.open(filepath)
+    num_pages = doc.page_count
 
-        if num_pages > max_pages:
-            raise ValueError(f"Rejected: PDF has {num_pages} pages, exceeds {max_pages} page limit")
+    if num_pages > max_pages:
+        doc.close()
+        raise ValueError(f"Rejected: PDF has {num_pages} pages, exceeds {max_pages} page limit")
 
-        for page in reader.pages:
-            text += page.extract_text() or ""
+    for page in doc:
+        text += page.get_text() or ""
 
-    # Security/reliability checkpoint: catch scanned PDFs or PDFs with no extractable text
+    doc.close()
+
     if not text.strip():
         raise ValueError("No extractable text found — this may be a scanned image PDF with no text layer")
 
@@ -50,7 +53,7 @@ def clean_text(text):
     text = re.sub(r"\n{3,}", "\n\n", text)  # collapse 3+ blank lines into 2
     return text.strip()
 
-def chunk_text(text, chunk_size=1000, chunk_overlap=200):
+def chunk_text(text, chunk_size=1500, chunk_overlap=200):
     """Split text into overlapping chunks for embedding/retrieval later."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
@@ -73,15 +76,36 @@ def build_vector_store(embeddings):
     index.add(embeddings)
     return index
 
+# ── NEW ───────────────────────────────────────────────────────────────────────
+def merge_vector_stores(existing_index, new_index):
+    """
+    Merge new_index into existing_index (both must be IndexFlatL2).
+    Mutates existing_index in-place and returns it.
+    Call this when a second (or third…) PDF is processed so all vectors
+    live in one combined index that search_similar_chunks queries.
+    """
+    existing_index.merge_from(new_index, 0)  # 0 = start copying from vector 0
+    return existing_index
+# ─────────────────────────────────────────────────────────────────────────────
+
 def search_similar_chunks(query, model, index, chunks, k=3):
-    """Embed a query and find the k most similar chunks."""
+    """
+    Embed a query and find the k most similar chunks.
+
+    chunks must be a list of dicts: [{"text": str, "source": str}, ...]
+    Returns a list of those same dicts so callers know which file each passage came from.
+    """
     query_vector = model.encode([query]).astype("float32")
-    distances, indices = index.search(query_vector, k)
-    results = [chunks[i] for i in indices[0]]
-    return results
+    k_safe = min(k, index.ntotal)          # guard: can't request more than we have
+    distances, indices = index.search(query_vector, k_safe)
+    return [chunks[i] for i in indices[0] if i < len(chunks)]
 
 def generate_answer(question, context_chunks, client):
-    """Build a prompt combining retrieved context and the question, then ask the LLM."""
+    """
+    Build a prompt combining retrieved context and the question, then ask the LLM.
+    context_chunks must be a list of plain strings (pass [s["text"] for s in sources]
+    from app.py — the source-tagging lives in the UI layer, not here).
+    """
     context = "\n\n---\n\n".join(context_chunks)
 
     system_prompt = (
@@ -137,29 +161,34 @@ if __name__ == "__main__":
         text = clean_text(text)
         print(f"Extracted {len(text)} characters (after cleanup)")
 
-        chunks = chunk_text(text)
-        print(f"Created {len(chunks)} chunks")
+        raw_chunks = chunk_text(text)
+        print(f"Created {len(raw_chunks)} chunks")
 
-        if len(chunks) > 5:
-            print(f"\n--- Sample chunk (#5) ---\n{chunks[5]}")
+        # Tag each chunk with its source filename (dict format used by search_similar_chunks)
+        source_name = os.path.basename(filepath)
+        chunks = [{"text": c, "source": source_name} for c in raw_chunks]
+
+        if len(raw_chunks) > 5:
+            print(f"\n--- Sample chunk (#5) ---\n{raw_chunks[5]}")
         else:
-            print(f"\n--- Sample chunk (#0) ---\n{chunks[0]}")
+            print(f"\n--- Sample chunk (#0) ---\n{raw_chunks[0]}")
 
         embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-        embeddings = embed_chunks(chunks, embedding_model)
+        embeddings = embed_chunks(raw_chunks, embedding_model)
         print(f"Created {len(embeddings)} embeddings")
 
         index = build_vector_store(embeddings)
         print(f"Vector store built with {index.ntotal} vectors")
 
         test_question = "What is broken or in progress?"
-        results = search_similar_chunks(test_question, embedding_model, index, chunks, k=2)
+        results = search_similar_chunks(test_question, embedding_model, index, chunks, k=5)
 
         print(f"\n--- Question: {test_question} ---")
-        for i, chunk in enumerate(results):
-            print(f"\nResult {i+1}:\n{chunk}")
+        for i, result in enumerate(results):
+            print(f"\nResult {i+1} (from: {result['source']}):\n{result['text']}")
 
-        answer = generate_answer(test_question, results, client)
+        # generate_answer receives plain strings
+        answer = generate_answer(test_question, [r["text"] for r in results], client)
         print(f"\n--- LLM Answer ---\n{answer}")
 
     except ValueError as e:
