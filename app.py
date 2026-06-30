@@ -2,7 +2,10 @@ import streamlit as st
 import streamlit.components.v1 as components
 import os
 import uuid
-import html as html_lib          # ← for escaping raw chunk text (Bug 3 fix)
+import time
+import pickle
+import faiss
+import html as html_lib          # for escaping raw chunk text
 from sentence_transformers import SentenceTransformer
 from groq import Groq
 from dotenv import load_dotenv
@@ -15,13 +18,17 @@ from ingest import (
     chunk_text,
     embed_chunks,
     build_vector_store,
-    merge_vector_stores,        # ← NEW
+    merge_vector_stores,
     search_similar_chunks,
     generate_answer,
 )
+import yaml
+from yaml.loader import SafeLoader
+import streamlit_authenticator as stauth
 
 load_dotenv()
 
+# ── 1. Page config MUST be the first Streamlit command ─────────────────────
 st.set_page_config(
     page_title="StudyBuddy",
     page_icon="📖",
@@ -29,20 +36,164 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# ── 2. Auth setup ────────────────────────────────────────────────────────────
+with open("config.yaml") as f:
+    config = yaml.load(f, Loader=SafeLoader)
+
+authenticator = stauth.Authenticate(
+    config["credentials"],
+    config["cookie"]["name"],
+    config["cookie"]["key"],
+    config["cookie"]["expiry_days"],
+)
+
+oauth2_config = {
+    "google": {
+        "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+        "redirect_uri": os.getenv("GOOGLE_REDIRECT_URI"),
+    }
+}
+
+# ── 3. Login gate — Google OAuth only ───────────────────────────────────────
+if not st.session_state.get("authentication_status"):
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+        height: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        font-family: 'Inter', sans-serif;
+        background: #f0f2f8;
+    }
+    #root, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"],
+    [data-testid="stMainBlockContainer"] {
+        height: 100vh !important;
+        min-height: 100vh !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    .stAppHeader, [data-testid="stHeader"],
+    #MainMenu, footer, header,
+    [data-testid="stToolbar"], [data-testid="stDecoration"],
+    [data-testid="stStatusWidget"] {
+        display: none !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    .block-container, [data-testid="block-container"] {
+        padding: 0 !important;
+        margin: 0 !important;
+        max-width: 100% !important;
+        height: 100vh !important;
+        min-height: 100vh !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+    .login-wrap {
+        max-width: 420px;
+        width: 100%;
+        background: #ffffff;
+        border: 1px solid #dde1f0;
+        border-radius: 14px;
+        padding: 36px 32px;
+        text-align: center;
+        margin: 0 auto 16px;
+    }
+    .login-icon { font-size: 40px; margin-bottom: 6px; }
+    .login-title { font-size: 22px; font-weight: 700; color: #1a2e6e; margin-bottom: 4px; }
+    .login-sub { font-size: 13px; color: #9098be; margin-bottom: 0; }
+    div[data-testid="stButton"] button {
+        background: #1a2e6e !important;
+        color: #fff !important;
+        border: none !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+        height: 46px !important;
+        width: 100% !important;
+    }
+    div[data-testid="stButton"] button:hover { background: #122060 !important; }
+    </style>
+    <div class="login-wrap">
+      <div class="login-icon">📖</div>
+      <div class="login-title">StudyBuddy</div>
+      <div class="login-sub">Sign in with Google to continue</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 1.2, 1])
+    with col2:
+        try:
+            authenticator.experimental_guest_login(
+                "Sign in with Google",
+                location="main",
+                provider="google",
+                oauth2=oauth2_config,
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.error(f"Google login error: {e}")
+
+    # If login just succeeded during this run, force a full rerun so the
+    # login-screen markup never coexists with the main app's CSS/layout.
+    if st.session_state.get("authentication_status"):
+        st.rerun()
+
+auth_status = st.session_state.get("authentication_status")
+name = st.session_state.get("name")
+username = st.session_state.get("username")
+
+if auth_status is False:
+    st.stop()
+elif auth_status is None:
+    st.stop()
+
+# auth_status is True past this point — user is logged in
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 /* ═══════════════════════════════════════════════════════
-   RESET & BASE
+   RESET & BASE — full-viewport, edge-to-edge, no gaps
 ═══════════════════════════════════════════════════════ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
+    height: 100% !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
     font-family: 'Inter', sans-serif;
-    height: 100dvh;
     overflow: hidden;
     background: #f0f2f8;
+}
+
+#root,
+.stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+[data-testid="stMainBlockContainer"],
+[data-testid="stAppViewBlockSpacer"] {
+    height: 100vh !important;
+    min-height: 100vh !important;
+    max-height: 100vh !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    top: 0 !important;
+    overflow: hidden !important;
+}
+
+/* Kill any default top offset/inset Streamlit applies to the view container */
+[data-testid="stAppViewContainer"] {
+    position: relative !important;
+    inset: 0 !important;
 }
 
 * { scrollbar-width: thin; scrollbar-color: #c5cce8 transparent; }
@@ -53,26 +204,68 @@ html, body {
 
 .stApp {
     background: #f0f2f8;
-    height: 100dvh !important;
+}
+
+.stAppHeader, [data-testid="stHeader"],
+#MainMenu, footer, header,
+[data-testid="stToolbar"], [data-testid="stDecoration"],
+[data-testid="stStatusWidget"] {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    max-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* The actual full-bleed flex root: no max-width, no centering, no padding */
+.stMainBlockContainer, [data-testid="stMainBlockContainer"],
+.stAppViewContainer, [data-testid="stAppViewContainer"],
+.stMain, [data-testid="stMain"] {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: none !important;
+    width: 100% !important;
+    height: 100vh !important;
+    min-height: 100vh !important;
+    max-height: 100vh !important;
     overflow: hidden !important;
 }
 
-#MainMenu, footer, header { visibility: hidden; }
+.block-container, [data-testid="block-container"] {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: none !important;
+    width: 100% !important;
+    height: 100vh !important;
+    min-height: 100vh !important;
+    max-height: 100vh !important;
+    overflow: hidden !important;
+    display: flex !important;
+}
+
+[data-testid="stSidebar"] {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    flex: 0 0 0 !important;
+}
 
 /* ═══════════════════════════════════════════════════════
-   STREAMLIT CHROME — make every wrapper flex-transparent
+   MAIN LAYOUT — ChatGPT-style: fixed sidebar + flex:1 chat,
+   both touching the very top of the viewport, no gaps.
 ═══════════════════════════════════════════════════════ */
-.block-container {
-    padding: 0 !important;
-    max-width: 100% !important;
-    height: 100dvh !important;
-    overflow: hidden !important;
-}
-
-/* The two-column horizontal block = our app shell */
 [data-testid="stHorizontalBlock"] {
-    height: 100dvh !important;
-    min-height: 0 !important;
+    display: flex !important;
+    flex-direction: row !important;
+    height: 100vh !important;
+    min-height: 100vh !important;
+    max-height: 100vh !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
     align-items: stretch !important;
     gap: 0 !important;
     flex-wrap: nowrap !important;
@@ -80,21 +273,26 @@ html, body {
 }
 
 /* ═══════════════════════════════════════════════════════
-   LEFT COLUMN — sidebar panel
+   LEFT COLUMN — fixed-width sidebar, full height, no top gap
 ═══════════════════════════════════════════════════════ */
 [data-testid="stHorizontalBlock"] > div:first-child {
     background: #ffffff;
     border-right: 1px solid #dde1f0;
     height: 100dvh !important;
-    min-height: 0 !important;
+    min-height: 100dvh !important;
+    max-height: 100dvh !important;
     overflow-y: auto !important;
     overflow-x: hidden !important;
     padding: 24px 16px !important;
-    flex-shrink: 0 !important;
+    margin: 0 !important;
+    width: 360px !important;
+    min-width: 360px !important;
+    max-width: 360px !important;
+    flex: 0 0 360px !important;
 }
 
 /* ═══════════════════════════════════════════════════════
-   RIGHT COLUMN — chat shell
+   RIGHT COLUMN — chat shell, fills all remaining space
 ═══════════════════════════════════════════════════════ */
 [data-testid="stHorizontalBlock"] > div:last-child {
     display: flex !important;
@@ -103,6 +301,7 @@ html, body {
     min-height: 0 !important;
     overflow: hidden !important;
     padding: 0 !important;
+    margin: 0 !important;
     background: #f0f2f8;
     min-width: 0 !important;
     flex: 1 1 auto !important;
@@ -118,6 +317,8 @@ html, body {
     min-height: 0 !important;
     overflow: hidden !important;
     gap: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
 }
 
 /* ─── Chat header ─────────────────────────────────────── */
@@ -295,7 +496,6 @@ html, body {
 .sb-file-name { font-size: clamp(11px, 1.5vw, 13px); font-weight: 600; color: #1c1e2e; word-break: break-all; }
 .sb-file-meta { font-size: 11px; color: #9098be; margin-top: 2px; }
 
-/* ── NEW: doc count badge ── */
 .sb-doc-badge {
     display: inline-flex; align-items: center; gap: 5px;
     background: #1a2e6e; color: #fff;
@@ -378,7 +578,6 @@ html, body {
     font-size: clamp(11px, 1.5vw, 12.5px); color: #505880; line-height: 1.65; word-break: break-word;
 }
 .src-num { font-size: 10px; font-weight: 700; color: #1a2e6e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
-/* ── NEW: source filename tag inside passage card ── */
 .src-file {
     font-size: 10px; color: #9098be; font-style: italic; margin-bottom: 5px;
 }
@@ -407,7 +606,6 @@ html, body {
 }
 .stButton > button:hover { background: #122060 !important; }
 
-/* ── Clear/danger button — targets Streamlit's secondary button type ── */
 [data-testid="stBaseButton-secondary"] {
     background: #fdecea !important; color: #c0392b !important;
     border: 1.5px solid #f0c4c0 !important;
@@ -534,9 +732,10 @@ div[data-testid="stExpander"] summary { font-size: 12px !important; color: #6870
 @media (min-width: 768px) and (max-width: 991.98px) {
     [data-testid="stHorizontalBlock"] > div:first-child {
         padding: 20px 12px !important;
-        min-width: 200px !important;
+        width: 220px !important;
+        min-width: 220px !important;
         max-width: 220px !important;
-        flex: 0 0 210px !important;
+        flex: 0 0 220px !important;
     }
 
     .chat-header-menu-slot { display: none !important; }
@@ -566,9 +765,10 @@ div[data-testid="stExpander"] summary { font-size: 12px !important; color: #6870
 @media (min-width: 992px) and (max-width: 1199.98px) {
     [data-testid="stHorizontalBlock"] > div:first-child {
         padding: 22px 14px !important;
-        flex: 0 0 230px !important;
-        min-width: 220px !important;
-        max-width: 250px !important;
+        flex: 0 0 280px !important;
+        width: 280px !important;
+        min-width: 280px !important;
+        max-width: 280px !important;
     }
 
     .chat-header { padding: 0 20px; }
@@ -579,9 +779,10 @@ div[data-testid="stExpander"] summary { font-size: 12px !important; color: #6870
 
 @media (min-width: 1024px) and (max-width: 1366px) and (pointer: coarse) {
     [data-testid="stHorizontalBlock"] > div:first-child {
-        flex: 0 0 250px !important;
-        min-width: 240px !important;
-        max-width: 270px !important;
+        flex: 0 0 300px !important;
+        width: 300px !important;
+        min-width: 300px !important;
+        max-width: 300px !important;
         padding: 24px 16px !important;
     }
 
@@ -617,34 +818,89 @@ div[data-testid="stExpander"] summary { font-size: 12px !important; color: #6870
     .st-key-chat_messages { padding: 32px 64px 24px !important; }
 }
 
-@supports (padding-top: env(safe-area-inset-top)) {
-    .chat-header {
-        padding-top: max(0px, env(safe-area-inset-top));
-        height: calc(52px + max(0px, env(safe-area-inset-top)));
-    }
-}
 </style>
 """, unsafe_allow_html=True)
 
 
 # ── Session state ─────────────────────────────────────────────────────────────
-# chunks is now a list of dicts: {"text": str, "source": str}
 for k, v in {
-    "session_id": str(uuid.uuid4()),
+    "session_id": username,        # tied to the logged-in user, not a random UUID
     "index": None,
     "chunks": [],          # list[dict]  {"text": ..., "source": ...}
     "pdf_names": [],       # ordered list of loaded filenames
     "conversation": [],
     "model": None,
     "client": None,
+    "last_active": time.time(),
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-if st.session_state.model is None:
-    st.session_state.model = SentenceTransformer("all-MiniLM-L6-v2")
-if st.session_state.client is None:
-    st.session_state.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# ── Idle timeout check ──────────────────────────────────────────────────────
+IDLE_TIMEOUT_SECONDS = 30 * 60
+if time.time() - st.session_state.last_active > IDLE_TIMEOUT_SECONDS:
+    for k in ["index", "chunks", "pdf_names", "conversation"]:
+        st.session_state[k] = [] if isinstance(st.session_state[k], list) else None
+    st.warning("Session expired due to inactivity. Please log in again.")
+    st.stop()
+st.session_state.last_active = time.time()
+
+@st.cache_resource(show_spinner=False)
+def load_embedding_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+@st.cache_resource(show_spinner=False)
+def load_groq_client():
+    return Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+st.session_state.model = load_embedding_model()
+st.session_state.client = load_groq_client()
+
+# ── Per-user persistent storage ──────────────────────────────────────────────
+USER_STORE_ROOT = "faiss_store"
+
+def _user_dir(user_id: str) -> str:
+    safe_id = "".join(c for c in user_id if c.isalnum() or c in ("-", "_"))
+    path = os.path.join(USER_STORE_ROOT, safe_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def save_user_store():
+    user_dir = _user_dir(username)
+    if st.session_state.index is not None:
+        faiss.write_index(st.session_state.index, os.path.join(user_dir, "index.faiss"))
+        with open(os.path.join(user_dir, "chunks.pkl"), "wb") as f:
+            pickle.dump({
+                "chunks": st.session_state.chunks,
+                "pdf_names": st.session_state.pdf_names,
+            }, f)
+    else:
+        clear_user_store()
+
+def load_user_store():
+    user_dir = _user_dir(username)
+    index_path = os.path.join(user_dir, "index.faiss")
+    chunks_path = os.path.join(user_dir, "chunks.pkl")
+    if os.path.exists(index_path) and os.path.exists(chunks_path):
+        try:
+            st.session_state.index = faiss.read_index(index_path)
+            with open(chunks_path, "rb") as f:
+                data = pickle.load(f)
+                st.session_state.chunks = data.get("chunks", [])
+                st.session_state.pdf_names = data.get("pdf_names", [])
+        except Exception:
+            clear_user_store()
+
+def clear_user_store():
+    user_dir = _user_dir(username)
+    for fname in ("index.faiss", "chunks.pkl"):
+        fpath = os.path.join(user_dir, fname)
+        if os.path.exists(fpath):
+            os.remove(fpath)
+
+if not st.session_state.get("_store_loaded"):
+    load_user_store()
+    st.session_state._store_loaded = True
 
 def render_bullets(raw: str) -> str:
     lines = raw.strip().split("\n")
@@ -675,17 +931,15 @@ def render_bullets(raw: str) -> str:
 
 
 def run_answer(question):
-    if not st.session_state.pdf_names:          # always read live state, never module-level cache
+    if not st.session_state.pdf_names:
         st.warning("Please upload and process a PDF first.")
         return
     with st.spinner("Generating answer…"):
         try:
-            # search_similar_chunks now returns list of dicts {"text", "source"}
             sources = search_similar_chunks(
                 question, st.session_state.model,
                 st.session_state.index, st.session_state.chunks, k=3,
             )
-            # generate_answer works on plain text; pass just the text parts
             answer = generate_answer(
                 question,
                 [s["text"] for s in sources],
@@ -694,7 +948,7 @@ def run_answer(question):
             st.session_state.conversation.append({
                 "question": question,
                 "answer": answer,
-                "sources": sources,   # list of {"text", "source"}
+                "sources": sources,
             })
             st.rerun()
         except Exception as e:
@@ -702,7 +956,6 @@ def run_answer(question):
 
 
 def process_pdf(uploaded_file):
-    """Ingest one PDF and merge into the session index. Returns True on success."""
     name = uploaded_file.name
     if name in st.session_state.pdf_names:
         st.warning(f'"{name}" is already loaded.')
@@ -723,7 +976,6 @@ def process_pdf(uploaded_file):
 
         slot.caption("⏳ Chunking & embedding…")
         raw_chunks = chunk_text(text)
-        # Tag each chunk with its source filename
         tagged_chunks = [{"text": c, "source": name} for c in raw_chunks]
         embeddings = embed_chunks(raw_chunks, st.session_state.model)
 
@@ -739,6 +991,8 @@ def process_pdf(uploaded_file):
 
         st.session_state.chunks.extend(tagged_chunks)
         st.session_state.pdf_names.append(name)
+
+        save_user_store()
 
         os.remove(save_path)
         slot.empty()
@@ -844,7 +1098,10 @@ with left:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Document count badge ──────────────────────────────────────────
+    if st.button("Logout", key="logout_btn"):
+        authenticator.logout()
+        st.rerun()
+
     if st.session_state.pdf_names:
         n = len(st.session_state.pdf_names)
         total_chunks = len(st.session_state.chunks)
@@ -855,11 +1112,9 @@ with left:
     else:
         st.markdown('<div class="sb-status waiting">○ No documents loaded</div>', unsafe_allow_html=True)
 
-    # ── Loaded documents list ─────────────────────────────────────────
     if st.session_state.pdf_names:
         st.markdown('<div class="sb-label">Loaded Documents</div>', unsafe_allow_html=True)
         for fname in st.session_state.pdf_names:
-            # count chunks that belong to this file
             n_chunks = sum(1 for c in st.session_state.chunks if c["source"] == fname)
             st.markdown(f"""
             <div class="sb-file-card">
@@ -873,7 +1128,6 @@ with left:
 
         st.markdown('<hr class="sb-divider">', unsafe_allow_html=True)
 
-    # ── Upload section ────────────────────────────────────────────────
     label = "Add PDFs" if st.session_state.pdf_names else "Document"
     st.markdown(f'<div class="sb-label">{label}</div>', unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
@@ -883,7 +1137,6 @@ with left:
         label_visibility="collapsed",
     )
 
-    # Filter to only files not yet ingested
     new_files = [f for f in uploaded_files if f.name not in st.session_state.pdf_names]
 
     if new_files:
@@ -906,10 +1159,8 @@ with left:
             if any_ok:
                 st.rerun()
     elif uploaded_files:
-        # All uploaded files are already loaded
         st.info("All selected files are already loaded.")
 
-    # ── Reset all ────────────────────────────────────────────────────
     if st.session_state.pdf_names:
         st.markdown('<hr class="sb-divider">', unsafe_allow_html=True)
         if st.button("🗑 Clear all documents", key="clear_btn", type="secondary"):
@@ -917,6 +1168,7 @@ with left:
             st.session_state.chunks       = []
             st.session_state.pdf_names    = []
             st.session_state.conversation = []
+            clear_user_store()
             st.rerun()
 
     st.markdown('<hr class="sb-divider">', unsafe_allow_html=True)
@@ -936,7 +1188,6 @@ with left:
 # RIGHT — Chat
 # ════════════════════════════════════════════════════════════════════════════
 with right:
-    # Dynamic header subtitle showing loaded doc names
     if st.session_state.pdf_names:
         doc_label = ", ".join(st.session_state.pdf_names)
         if len(doc_label) > 48:
@@ -983,10 +1234,8 @@ with right:
                 if turn.get("sources"):
                     with st.expander(f"📄 View {len(turn['sources'])} source passage(s)"):
                         for j, src in enumerate(turn["sources"], 1):
-                            # src is a dict: {"text": ..., "source": filename}
                             text  = src["text"]   if isinstance(src, dict) else src
                             fname = src.get("source", "") if isinstance(src, dict) else ""
-                            # escape so <, >, & in PDF text don't break the HTML
                             safe_text  = html_lib.escape(text)
                             safe_fname = html_lib.escape(fname)
                             st.markdown(f"""
