@@ -75,6 +75,29 @@ if not st.session_state.get("authentication_status"):
         margin: 0 !important;
         padding: 0 !important;
     }
+    /* ── Fix: Streamlit's flex-column wrapper applies a 1rem gap between
+       children, which shows up as blank space above the login card ── */
+    [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+    }
+    [data-testid="stMainBlockContainer"] > div {
+        gap: 0 !important;
+    }
+    /* ── Fix: collapse Streamlit's internal top spacer instead of
+       stretching it to 100vh (was causing blank space above app) ── */
+    [data-testid="stAppViewBlockSpacer"] {
+        display: none !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        max-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    [data-testid="stMain"] > div,
+    [data-testid="stMainBlockContainer"] > div {
+        padding-top: 0 !important;
+        margin-top: 0 !important;
+    }
     .stAppHeader, [data-testid="stHeader"],
     #MainMenu, footer, header,
     [data-testid="stToolbar"], [data-testid="stDecoration"],
@@ -137,7 +160,11 @@ if not st.session_state.get("authentication_status"):
                 use_container_width=True,
             )
         except Exception as e:
+            import traceback
             st.error(f"Google login error: {e}")
+            print("=" * 60)
+            traceback.print_exc()
+            print("=" * 60)
 
     # If login just succeeded during this run, force a full rerun so the
     # login-screen markup never coexists with the main app's CSS/layout.
@@ -178,8 +205,7 @@ html, body {
 .stApp,
 [data-testid="stAppViewContainer"],
 [data-testid="stMain"],
-[data-testid="stMainBlockContainer"],
-[data-testid="stAppViewBlockSpacer"] {
+[data-testid="stMainBlockContainer"] {
     height: 100vh !important;
     min-height: 100vh !important;
     max-height: 100vh !important;
@@ -194,6 +220,38 @@ html, body {
 [data-testid="stAppViewContainer"] {
     position: relative !important;
     inset: 0 !important;
+}
+
+/* ── Fix: Streamlit's flex-column wrapper (stVerticalBlock) applies a
+   1rem 'gap' between its children. Even with all margin/padding zeroed,
+   this gap property alone was inserting the blank strip above the app
+   content. Confirmed via DevTools -- this was the real culprit, not
+   margin/padding/spacer height. ── */
+[data-testid="stVerticalBlock"] {
+    gap: 0 !important;
+}
+[data-testid="stMainBlockContainer"] > div {
+    gap: 0 !important;
+}
+
+/* ── Fix: this spacer div was previously grouped into the block above
+   and stretched to 100vh, which pushed the whole layout down and
+   created a blank strip above the app. Collapse it to zero instead. ── */
+[data-testid="stAppViewBlockSpacer"] {
+    display: none !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    max-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* ── Fix: neutralize any inline/implicit top padding Streamlit adds
+   to the main block wrapper ── */
+[data-testid="stMain"] > div,
+[data-testid="stMainBlockContainer"] > div {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
 }
 
 * { scrollbar-width: thin; scrollbar-color: #c5cce8 transparent; }
@@ -289,6 +347,7 @@ html, body {
     min-width: 360px !important;
     max-width: 360px !important;
     flex: 0 0 360px !important;
+    position: relative !important;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -476,7 +535,7 @@ html, body {
 ═══════════════════════════════════════════════════════ */
 .sb-brand {
     display: flex; align-items: center; gap: 9px;
-    margin-bottom: 22px; padding-bottom: 16px;
+    margin-bottom: 22px; padding-bottom: 16px; padding-right: 46px;
     border-bottom: 1px solid #eaecf5; flex-wrap: wrap;
 }
 .sb-brand-name { font-size: clamp(14px, 2vw, 17px); font-weight: 700; color: #1a2e6e; }
@@ -484,9 +543,37 @@ html, body {
     font-size: 11px; color: #9098be;
     background: #eef0fa; padding: 2px 8px; border-radius: 10px; white-space: nowrap;
 }
+
+/* ─── Logout icon button — floats top-right of sidebar, next to brand ─── */
+.st-key-logout_btn {
+    position: absolute !important;
+    top: 24px !important;
+    right: 16px !important;
+    width: auto !important;
+    z-index: 5 !important;
+}
+.st-key-logout_btn button {
+    width: 34px !important;
+    height: 34px !important;
+    min-height: 34px !important;
+    padding: 0 !important;
+    border-radius: 8px !important;
+    background: transparent !important;
+    border: 1px solid #dde1f0 !important;
+    color: #9098be !important;
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    box-shadow: none !important;
+}
+.st-key-logout_btn button:hover {
+    background: #fdecea !important;
+    color: #c0392b !important;
+    border-color: #f0c4c0 !important;
+}
 .sb-label {
     font-size: 10px; font-weight: 700; letter-spacing: 1.1px;
     text-transform: uppercase; color: #a0a9cc; margin-bottom: 10px;
+    padding :10px;
 }
 .sb-file-card {
     background: #f5f7fe; border: 1px solid #e0e4f4; border-radius: 10px;
@@ -1098,8 +1185,11 @@ with left:
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("Logout", key="logout_btn"):
-        authenticator.logout()
+    if st.button("⏻", key="logout_btn", help="Logout"):
+        authenticator.logout(location="unrendered", key="logout_unrendered")
+        st.session_state["authentication_status"] = None
+        st.session_state["name"] = None
+        st.session_state["username"] = None
         st.rerun()
 
     if st.session_state.pdf_names:
