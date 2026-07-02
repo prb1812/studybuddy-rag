@@ -1,7 +1,7 @@
 import os
 import re
 import pypdf
-import magic
+import puremagic
 import faiss
 import numpy as np
 from groq import Groq
@@ -14,7 +14,10 @@ MAX_PAGES = 1000
 
 def validate_file(filepath, allowed_types=("application/pdf", "text/plain")):
     """Check actual file content type, not just the extension."""
-    detected_type = magic.from_file(filepath, mime=True)
+    try:
+        detected_type = puremagic.from_file(filepath, mime=True)
+    except puremagic.PureError:
+        raise ValueError("Rejected: could not determine file type — file may be empty or corrupt")
     if detected_type not in allowed_types:
         raise ValueError(f"Rejected: file is actually '{detected_type}', not allowed")
     return detected_type
