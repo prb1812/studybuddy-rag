@@ -37,8 +37,12 @@ st.set_page_config(
 )
 
 # ── 2. Auth setup ────────────────────────────────────────────────────────────
-with open("config.yaml") as f:
-    config = yaml.load(f, Loader=SafeLoader)
+if os.path.exists("config.yaml"):
+    with open("config.yaml") as f:
+        config = yaml.load(f, Loader=SafeLoader)
+else:
+    # Cloud deployment: config.yaml is gitignored, so load it from Secrets instead
+    config = yaml.load(st.secrets["CONFIG_YAML"], Loader=SafeLoader)
 
 authenticator = stauth.Authenticate(
     config["credentials"],
